@@ -549,7 +549,7 @@ hippo-challenge/
 ├── CLAUDE.md                     working agreement for AI assistants and contributors
 ├── CHALLENGE.md                  the assignment brief, unmodified
 ├── pyproject.toml / uv.lock      dependencies, managed by uv
-├── .env                          source paths and warehouse location
+├── .env                          optional, overrides the paths in settings.py. Not committed
 │
 ├── src/white_lodge/              INGESTION, dlt
 │   ├── cli.py                    `wl ingest`, one option per source directory
