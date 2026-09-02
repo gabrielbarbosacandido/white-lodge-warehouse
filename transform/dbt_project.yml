@@ -1,0 +1,37 @@
+name: white_lodge
+version: "0.1.0"
+config-version: 2
+profile: white_lodge
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # --- Modelling decisions, deliberately exposed as knobs ---------------------
+  # 140 claim ids appear more than once, and no colliding pair is an exact copy:
+  # same UUID, different npi/ndc/price/date. "quarantine_all" refuses to guess
+  # which is real; "keep_earliest" keeps the first fill and drops the rest.
+  duplicate_claim_policy: quarantine_all
+  # "as_of_fill" prices a claim at the latest NADAC snapshot published on or
+  # before the fill date. "latest" prices everything at the newest snapshot.
+  nadac_cost_basis: as_of_fill
+
+# Medallion layers. Each one has a single job and is named for it.
+#   landing  (dlt)     source-shaped drop + quarantine. Not modelled here.
+#   bronze             typed, renamed, lineage-stamped, quality-FLAGGED. Drops nothing.
+#   silver             cleaned and conformed business entities. This is where rows go.
+#   gold               the star schema analysts and agents query.
+models:
+  white_lodge:
+    bronze:
+      +materialized: view
+      +schema: bronze
+    silver:
+      +materialized: view
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold

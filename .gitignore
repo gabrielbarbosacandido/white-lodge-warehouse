@@ -1,0 +1,32 @@
+# Data, not committed; reproduce with `task data` (unpacks data/sample-data.tar.gz)
+data/*
+!data/.gitkeep
+
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# dbt
+transform/target/
+transform/dbt_packages/
+transform/logs/
+transform/.user.yml
+
+# Local
+.DS_Store
+
+# Claude Code local state
+.claude/settings.local.json
+.task-lock/
+
+# Personal study notes, not part of the deliverable
+STUDY.md
+
+# Personal documents that happen to sit in this directory, never committed
+payslip_*.pdf
+*.p12
+*.pem
+id_rsa*

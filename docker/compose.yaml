@@ -1,0 +1,53 @@
+name: white-lodge
+
+services:
+  # The pipeline: dlt ingest -> dbt build. Runs to completion and exits.
+  # There is no DuckDB *server* to run: DuckDB is embedded, so the warehouse is
+  # the file this container writes into the shared ./data volume.
+  # Profiled so `docker compose up` never starts it: this is a run-to-completion
+  # job, not a service. `docker compose run --rm pipeline` still works, run
+  # enables a service's own profiles automatically.
+  pipeline:
+    profiles: ["pipeline"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../data:/app/data
+    environment:
+      WL_CLAIMS_DIR: /app/data/landing/claims
+      WL_REVERTS_DIR: /app/data/landing/reverts
+      WL_LOOKUPS_DIR: /app/data/landing/lookups
+      WL_PHARMACIES_DIR: /app/data/landing/pharmacies
+      WL_PARTNERS_DIR: /app/data/landing/partners
+      WL_NADAC_DIR: /app/data/external/nadac
+      WL_DUCKDB_PATH: /app/data/warehouse/white_lodge.duckdb
+
+  # Analyst tooling for the live session, opt-in, never part of `up`.
+  # Started only via the `bi` profile so the repo does not ship a reporting layer.
+  superset:
+    profiles: ["bi"]
+    build:
+      context: ..
+      dockerfile: docker/superset/Dockerfile
+    ports:
+      - "8088:8088"
+    volumes:
+      # Read-only: DuckDB permits many readers OR one writer, never both, so
+      # this guarantees Superset can never block a dbt run.
+      - ../data/warehouse:/data/warehouse:ro
+      - superset_home:/app/superset_home
+    environment:
+      WL_DUCKDB_PATH: /data/warehouse/white_lodge.duckdb
+      SUPERSET_SECRET_KEY: white-lodge-local-dev-only
+      SUPERSET_ADMIN_USERNAME: admin
+      SUPERSET_ADMIN_PASSWORD: admin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+volumes:
+  superset_home:

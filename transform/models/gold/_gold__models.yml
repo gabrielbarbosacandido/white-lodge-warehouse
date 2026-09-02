@@ -1,0 +1,195 @@
+version: 2
+
+models:
+  - name: fct_claim
+    description: >
+      Fact table. GRAIN: one row per valid, in-scope claim. Reverted claims keep their
+      row, because the reversal rate is a metric. Every measure exists twice: gross,
+      meaning the value as submitted, and net_*, which is zero when the claim was
+      reverted. Business totals use the net_* columns.
+    columns:
+      - name: claim_id
+        description: The claim UUID from the source event. Unique after silver resolves collisions.
+        tests: [unique, not_null]
+      - name: npi
+        description: Pharmacy that filled the claim. Foreign key to dim_pharmacy.
+        tests:
+          - not_null
+          - relationships: {to: ref('dim_pharmacy'), field: npi}
+      - name: ndc
+        description: Drug dispensed. Foreign key to dim_drug.
+        tests:
+          - relationships: {to: ref('dim_drug'), field: ndc}
+      - name: partner
+        description: >
+          Partner that drove the converting lookup. Null for 933 claims that had no
+          converting lookup, because partner is a property of the lookup, not the claim.
+        tests:
+          - relationships: {to: ref('dim_partner'), field: partner}
+      - name: date_day
+        description: Fill date. Foreign key to dim_date.
+        tests:
+          - not_null
+          - relationships: {to: ref('dim_date'), field: date_day}
+      - name: chain
+        description: Pharmacy chain, denormalised from dim_pharmacy for convenience.
+      - name: channel
+        description: Channel of the converting lookup, normalised to lower case.
+      - name: is_reverted
+        description: True when a reversal invalidated this claim. Drives every net_* measure to zero.
+      - name: price
+        description: Gross total charged to the patient. Ignores reversal.
+      - name: pbm_fee
+        description: Gross fee collected on the claim, before the partner share.
+      - name: partner_fee
+        description: >
+          Gross partner share of pbm_fee. Flat terms are fee_cents divided by 100 and
+          capped at pbm_fee. Percentage terms are pbm_fee times fee_percentage over 100.
+      - name: white_lodge_margin
+        description: Gross pbm_fee minus partner_fee. What White Lodge retains.
+      - name: pharmacy_margin
+        description: Gross price minus drug_cost minus pbm_fee. What the pharmacy retains.
+      - name: drug_cost
+        description: nadac_per_unit times quantity. Null when the NDC has no NADAC match.
+      - name: nadac_per_unit
+        description: Per-unit acquisition cost from the NADAC snapshot in force on the fill date.
+      - name: cost_as_of_date
+        description: as_of_date of the NADAC snapshot used, always on or before date_day.
+      - name: net_revenue
+        description: price, or zero when reverted. Use this for revenue totals.
+        tests: [not_null]
+      - name: net_pbm_fee
+        description: pbm_fee, or zero when reverted.
+      - name: net_partner_fee
+        description: partner_fee, or zero when reverted. Use this for partner payouts.
+      - name: net_white_lodge_margin
+        description: white_lodge_margin, or zero when reverted. Use this for margin totals.
+      - name: net_fills
+        description: 1 for a completed fill, 0 when reverted. Use this to count fills.
+      - name: flag_cost_unavailable
+        description: True when the NDC has no NADAC row at all. 571 claims, roughly 1.4 percent.
+      - name: flag_fee_exceeds_price
+        description: >
+          True when pbm_fee is greater than price. Economically impossible but
+          structurally valid, so the row is retained and flagged rather than removed.
+
+  - name: fct_lookup
+    description: >
+      Fact table. GRAIN: one row per price lookup, the top of the conversion funnel.
+      Kept separate from fct_claim because 76 percent of lookups never convert. Claim
+      side columns are null for those.
+    columns:
+      - name: lookup_id
+        description: The lookup UUID from the source event.
+        tests: [unique, not_null]
+      - name: claim_id
+        description: The claim this lookup produced, or null when it did not convert.
+      - name: ndc
+        description: Drug whose price was requested. Foreign key to dim_drug.
+        tests:
+          - relationships: {to: ref('dim_drug'), field: ndc}
+      - name: partner
+        description: Partner that drove the lookup. Foreign key to dim_partner.
+      - name: channel
+        description: >
+          Lookup channel, normalised to lower case with empty mapped to unknown.
+          Observed values: website, integration, fax, phone, app, unknown.
+        tests: [not_null]
+      - name: date_day
+        description: Lookup date. Foreign key to dim_date.
+        tests:
+          - relationships: {to: ref('dim_date'), field: date_day}
+      - name: converted
+        description: True when the source lookup carried a claim_id.
+      - name: converted_to_valid_claim
+        description: >
+          True when the referenced claim survived into fct_claim. Differs from converted
+          for lookups pointing at claims that were excluded or never existed.
+      - name: flag_unknown_partner
+        description: True when the partner is absent from the partner reference file.
+      - name: minutes_to_fill
+        description: Minutes between the lookup and the fill. Null when it did not convert.
+
+  - name: dim_pharmacy
+    description: >
+      Dimension. GRAIN: one row per NPI. Membership in this table defines what counts as
+      in scope: claims for NPIs absent here are excluded in silver. Fully reloaded each
+      run, so it holds current values only.
+    columns:
+      - name: npi
+        description: National Provider Identifier, the pharmacy's national identifier.
+        tests: [unique, not_null]
+      - name: chain
+        description: Pharmacy chain, lower cased. Seven chains across 37 pharmacies.
+        tests: [not_null]
+
+  - name: dim_partner
+    description: >
+      Dimension. GRAIN: one row per partner, carrying commercial terms. A partner has
+      either a flat fee or a percentage fee, never both and never neither.
+    columns:
+      - name: partner
+        description: Partner name, the natural key used by lookups.
+        tests: [unique, not_null]
+      - name: fee_cents
+        description: >
+          Flat share of pbm_fee, denominated in CENTS while pbm_fee is in dollars. Zero
+          is a real commercial term for one partner and must not be read as null.
+      - name: fee_percentage
+        description: Proportional share of pbm_fee as a percentage, so 50.0 means 50 percent.
+      - name: fee_type
+        description: Derived label, flat or percentage, based on which term is populated.
+        tests:
+          - accepted_values: {values: ['flat', 'percentage']}
+
+  - name: dim_drug
+    description: >
+      Dimension. GRAIN: one row per NDC observed in any event. Built from the union of
+      claim and lookup NDCs, then left joined to the most recent NADAC snapshot that
+      names the drug. Built in that direction so that NDCs absent from NADAC still get
+      a row and neither fact loses claims on the join.
+    columns:
+      - name: ndc
+        description: National Drug Code, the drug's national identifier.
+        tests: [unique, not_null]
+      - name: ndc_description
+        description: Drug name and strength from NADAC. Null when the NDC is absent from NADAC.
+      - name: pricing_unit
+        description: Unit the NADAC cost is quoted in, for example EA, ML or GM.
+      - name: rate_setting_class
+        description: NADAC classification for rate setting. G indicates generic.
+      - name: is_generic
+        description: True when rate_setting_class is G.
+      - name: is_otc
+        description: True when NADAC marks the drug as over the counter.
+      - name: is_missing_from_nadac
+        description: >
+          True when the NDC has no NADAC row at all. Three of 49 codes, which are absent
+          by design in the sample data.
+
+  - name: dim_date
+    description: >
+      Dimension. GRAIN: one row per calendar day. Generated from the observed event date
+      range, so it can never end before the facts do.
+    columns:
+      - name: date_day
+        description: The calendar date, the key both facts join on.
+        tests: [unique, not_null]
+      - name: year
+        description: Calendar year.
+      - name: quarter
+        description: Calendar quarter, 1 to 4.
+      - name: month
+        description: Calendar month number, 1 to 12.
+      - name: month_name
+        description: Month name, for example March.
+      - name: month_start
+        description: First day of the month, for month over month grouping.
+      - name: week_start
+        description: First day of the week, for week over week grouping.
+      - name: day_of_week
+        description: Day number within the week.
+      - name: day_name
+        description: Day name, for example Monday.
+      - name: is_weekend
+        description: True for Saturday and Sunday.

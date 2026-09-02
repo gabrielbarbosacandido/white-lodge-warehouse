@@ -1,0 +1,7 @@
+white_lodge:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('WL_DUCKDB_PATH', '../data/warehouse/white_lodge.duckdb') }}"
+      threads: 10

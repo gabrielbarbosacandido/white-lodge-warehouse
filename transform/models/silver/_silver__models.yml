@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: slv_claims
+    description: Claim identity and scope resolved. Rows are removed here.
+    columns:
+      - name: claim_id
+        tests: [unique, not_null]
+      - name: chain
+        tests: [not_null]
+  - name: slv_reverts
+    description: One effective reversal per claim.
+    columns:
+      - name: claim_id
+        tests: [unique, not_null]
+  - name: slv_claim_economics
+    description: Cost, fee split, margin and reversal resolved.
+    columns:
+      - name: claim_id
+        tests: [unique, not_null]
+  - name: slv_nadac
+    description: The weekly snapshot series, one row per (ndc, as_of_date).
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ndc, as_of_date]

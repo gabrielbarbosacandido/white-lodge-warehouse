@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: landing
+    schema: landing
+    description: >
+      dlt's drop zone. Source-shaped and untyped, plus one quarantine table per
+      event stream. Never edited by hand and never read outside bronze.
+    tables:
+      - name: claims
+      - name: claims_rejects
+      - name: reverts
+      - name: reverts_rejects
+      - name: lookups
+      - name: lookups_rejects
+      - name: pharmacies
+      - name: partners
+      - name: nadac

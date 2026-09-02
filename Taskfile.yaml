@@ -1,0 +1,319 @@
+version: "3"
+
+# Single entrypoint for the whole project: data, pipeline, warehouse, BI.
+# Run `task` with no arguments to list everything.
+#
+# Two lanes, same pipeline:
+#   host:   fast, what you use while developing        (task build)
+#   docker: reproducible, what a teammate clones into  (task docker:all)
+
+dotenv: [".env"]
+
+vars:
+  COMPOSE: docker compose -f docker/compose.yaml
+  # every service, so build/down cover the pipeline image as well as Superset
+  COMPOSE_ALL: docker compose -f docker/compose.yaml --profile bi --profile pipeline
+  DUCKDB: '{{.WL_DUCKDB_PATH | default "data/warehouse/white_lodge.duckdb"}}'
+  LOCK: .task-lock
+
+env:
+  DBT_PROFILES_DIR: transform
+  WL_DUCKDB_PATH: '{{.WL_DUCKDB_PATH | default "data/warehouse/white_lodge.duckdb"}}'
+
+tasks:
+  default:
+    desc: List available tasks.
+    silent: true
+    cmds: ["task --list"]
+
+  # ===========================================================================
+  # ONE COMMAND
+  # ===========================================================================
+  all:
+    desc: "★ Everything on the host: deps → data → ingest → transform → test → Superset."
+    cmds:
+      - task: setup
+      - task: build
+      - task: bi:up
+
+  docker:all:
+    desc: "★ Everything in Docker: build images → ingest → transform → Superset."
+    cmds:
+      - task: docker:build
+      - task: docker:ingest
+      - task: docker:transform
+      - task: bi:up
+
+  # ===========================================================================
+  # SETUP
+  # ===========================================================================
+  setup:
+    desc: Install Python + dbt dependencies and unpack the sample data.
+    cmds:
+      - uv sync
+      - task: data
+      - task: deps
+
+  data:
+    desc: Unpack sample-data.tar.gz into data/landing.
+    status: ["test -d data/landing/claims"]
+    cmds:
+      - mkdir -p data/landing data/external/nadac data/warehouse
+      - tar -xzf data/sample-data.tar.gz -C data/landing
+      - 'echo "unpacked → data/landing"'
+
+  deps:
+    desc: Install dbt package dependencies.
+    status: ["test -d transform/dbt_packages"]
+    cmds:
+      - uv run dbt deps --project-dir transform --profiles-dir transform
+
+  # ===========================================================================
+  # PIPELINE, host lane
+  # ===========================================================================
+  build:
+    desc: "Run the pipeline end to end on the host: ingest → transform → test."
+    deps: [data]
+    cmds:
+      - task: ingest
+      - task: transform
+
+  ingest:
+    desc: "Step 1, land all sources into DuckDB via dlt. Subset: task ingest -- nadac"
+    deps: [data]
+    cmds:
+      - task: _lock
+      - defer: { task: _unlock }
+      - uv run wl ingest {{if .CLI_ARGS}}--only {{.CLI_ARGS}}{{end}}
+
+  ingest:events:
+    desc: Step 1a, events + reference only, skipping the 1M-row NADAC pull.
+    cmds:
+      - task: ingest
+        vars: { CLI_ARGS: "claims,reverts,lookups,pharmacies,partners" }
+
+  ingest:nadac:
+    desc: Step 1b. NADAC only, streamed from CMS (cached after the first pull).
+    cmds:
+      - task: ingest
+        vars: { CLI_ARGS: "nadac" }
+
+  transform:
+    desc: "Step 2, build and test bronze → silver → gold with dbt."
+    deps: [deps]
+    cmds:
+      - task: _lock
+      - defer: { task: _unlock }
+      - uv run dbt build --project-dir transform --profiles-dir transform
+
+  test:
+    desc: Run pytest and the dbt data tests.
+    cmds:
+      - uv run pytest -q
+      - uv run dbt test --project-dir transform --profiles-dir transform
+
+  catalog:
+    desc: >-
+      Generate the dbt catalog and manifest. Introspects the warehouse, so it needs
+      a built database and takes the writer lock.
+    deps: [deps]
+    preconditions:
+      - sh: test -f "{{.DUCKDB}}"
+        msg: "No warehouse yet. Run `task build` first; the catalog is read from the database."
+    cmds:
+      - task: _lock
+      - defer: { task: _unlock }
+      - uv run dbt docs generate --project-dir transform --profiles-dir transform
+      - 'echo "catalog  -> transform/target/catalog.json"'
+      - 'echo "manifest -> transform/target/manifest.json"'
+
+  catalog:empty:
+    desc: >-
+      Generate the manifest with an empty catalog. Skips warehouse introspection, so
+      it runs with no database and no lock.
+    deps: [deps]
+    cmds:
+      - uv run dbt docs generate --project-dir transform --profiles-dir transform --empty-catalog
+
+  catalog:static:
+    desc: >-
+      Generate a single self-contained HTML file at transform/target/static_index.html.
+      Openable in a browser with no server, so it can be attached or shared.
+    deps: [catalog]
+    cmds:
+      - uv run dbt docs generate --project-dir transform --profiles-dir transform --static
+      - 'echo "open transform/target/static_index.html"'
+
+  catalog:show:
+    desc: List the models and column counts recorded in the generated catalog.
+    silent: true
+    preconditions:
+      - sh: test -f transform/target/catalog.json
+        msg: "No catalog yet. Run `task catalog` first."
+    cmds:
+      - |
+        uv run python -c "
+        import json
+        c = json.load(open('transform/target/catalog.json'))
+        rows = sorted(
+            (n['metadata']['schema'], n['metadata']['name'], len(n['columns']))
+            for n in c['nodes'].values()
+        )
+        order = {'landing': 0, 'bronze': 1, 'silver': 2, 'gold': 3}
+        rows.sort(key=lambda r: (order.get(r[0], 9), r[1]))
+        print(f\"{'schema':<10} {'model':<26} columns\")
+        for schema, name, cols in rows:
+            print(f'{schema:<10} {name:<26} {cols}')
+        print(f'{len(rows)} relations in catalog')
+        "
+
+  docs:
+    desc: Generate the catalog and serve the lineage docs on :8090.
+    deps: [catalog]
+    cmds:
+      - uv run dbt docs serve --project-dir transform --profiles-dir transform --port 8090
+
+  docs:serve:
+    desc: Serve already-generated docs without regenerating the catalog.
+    preconditions:
+      - sh: test -f transform/target/catalog.json
+        msg: "No catalog yet. Run `task catalog` first."
+    cmds:
+      - uv run dbt docs serve --project-dir transform --profiles-dir transform --port 8090
+
+  # ===========================================================================
+  # PIPELINE, docker lane
+  # ===========================================================================
+  docker:build:
+    desc: Build the pipeline image only (`task up` builds both).
+    cmds: ["{{.COMPOSE}} build pipeline"]
+
+  docker:ingest:
+    desc: "Step 1 in Docker, dlt ingestion into the mounted ./data volume."
+    deps: [data]
+    cmds:
+      - task: _lock
+      - defer: { task: _unlock }
+      - '{{.COMPOSE}} run --rm pipeline "wl ingest{{if .CLI_ARGS}} --only {{.CLI_ARGS}}{{end}}"'
+
+  docker:transform:
+    desc: Step 2 in Docker, dbt build across bronze → silver → gold.
+    cmds:
+      - task: _lock
+      - defer: { task: _unlock }
+      - '{{.COMPOSE}} run --rm pipeline "dbt deps --project-dir transform && dbt build --project-dir transform"'
+
+  docker:pipeline:
+    desc: Both steps in Docker, in one container run.
+    cmds:
+      - task: docker:ingest
+      - task: docker:transform
+
+  docker:shell:
+    desc: Open a shell inside the pipeline image (for debugging the container).
+    cmds: ['{{.COMPOSE}} run --rm --entrypoint /bin/bash pipeline']
+
+  # ===========================================================================
+  # INFRA
+  # ===========================================================================
+  up:
+    desc: "★ Build the images and start the containers. Runs no pipeline."
+    silent: true
+    cmds:
+      - "{{.COMPOSE_ALL}} build"
+      - "{{.COMPOSE}} --profile bi up -d superset"
+      - |
+        echo "Superset → http://localhost:8088  (admin/admin). First boot takes ~60s."
+        if [ ! -f "{{.DUCKDB}}" ]; then
+          echo ""
+          echo "  Note: no warehouse at {{.DUCKDB}} yet."
+          echo "  Superset is up but has nothing to query. Next: task ingest, then task transform."
+        fi
+
+  bi:up:
+    desc: Alias for `task up`.
+    cmds:
+      - task: up
+
+  bi:logs:
+    desc: Tail Superset logs, use this to watch first boot finish.
+    cmds: ["{{.COMPOSE}} --profile bi logs -f superset"]
+
+  bi:down:
+    desc: Alias for `task down`.
+    cmds:
+      - task: down
+
+  ps:
+    desc: Show what is running.
+    cmds: ["{{.COMPOSE_ALL}} ps"]
+
+  down:
+    desc: "★ Stop and remove every container in the compose project."
+    cmds: ["{{.COMPOSE_ALL}} down --remove-orphans"]
+
+  refresh:
+    desc: >-
+      Rebuild the warehouse safely while Superset is up. DuckDB allows many readers
+      OR one writer, so Superset must release the file before dbt writes.
+    cmds:
+      - task: bi:down
+      - task: build
+      - task: bi:up
+
+  # ===========================================================================
+  # QUERYING
+  # ===========================================================================
+  query:
+    desc: 'Read-only DuckDB shell. One-shot: task query -- "select 1"'
+    preconditions:
+      - sh: test -f "{{.DUCKDB}}"
+        msg: "No warehouse yet, run `task build` first."
+    cmds:
+      - uv run python -m white_lodge.query {{.CLI_ARGS | default ""}}
+
+  # ===========================================================================
+  # HOUSEKEEPING
+  # ===========================================================================
+  clean:
+    desc: Delete the warehouse and dbt artifacts (keeps landed source files).
+    cmds:
+      - rm -rf "{{.DUCKDB}}" transform/target transform/logs
+      - uv run dlt pipeline white_lodge drop-pending-packages 2>/dev/null || true
+      - 'echo "warehouse removed, run `task build` to rebuild"'
+
+  nuke:
+    desc: clean + remove containers, volumes, and the cached NADAC download.
+    cmds:
+      - task: clean
+      - "{{.COMPOSE_ALL}} down -v --remove-orphans || true"
+      - rm -rf data/external/nadac
+
+  unlock:
+    desc: Remove a stale pipeline lock left by an interrupted run.
+    cmds:
+      - rm -rf {{.LOCK}}
+      - 'echo "lock released"'
+
+  # ---------------------------------------------------------------------------
+  # Internal: one writer at a time.
+  # DuckDB is single-writer and dlt keys its load packages on the pipeline name,
+  # so two concurrent runs corrupt each other's state. This makes that a fast,
+  # readable failure instead of a mid-normalize traceback.
+  # ---------------------------------------------------------------------------
+  _lock:
+    internal: true
+    cmds:
+      - |
+        if ! mkdir {{.LOCK}} 2>/dev/null; then
+          echo "" >&2
+          echo "  Another pipeline run holds the lock ({{.LOCK}})." >&2
+          echo "  DuckDB is single-writer, wait for it to finish." >&2
+          echo "  If no run is active, the lock is stale: task unlock" >&2
+          echo "" >&2
+          exit 1
+        fi
+
+  _unlock:
+    internal: true
+    cmds: ["rm -rf {{.LOCK}}"]
