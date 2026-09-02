@@ -28,10 +28,11 @@ not a production platform.
 7. [The star schema](#7-the-star-schema)
 8. [Repository structure](#8-repository-structure)
 9. [Design decisions](#9-design-decisions)
-10. [Querying, charting and the data catalog](#10-querying-charting-and-the-data-catalog)
-11. [Tests](#11-tests)
-12. [Spec-driven development for AI](#12-spec-driven-development-for-ai)
-13. [Limits and next steps](#13-limits-and-next-steps)
+10. [Proposed metrics](#10-proposed-metrics)
+11. [Querying, charting and the data catalog](#11-querying-charting-and-the-data-catalog)
+12. [Tests](#12-tests)
+13. [Spec-driven development for AI](#13-spec-driven-development-for-ai)
+14. [Limits and next steps](#14-limits-and-next-steps)
 
 ---
 
@@ -158,14 +159,15 @@ Code: [`docker/`](docker/)
 
 ### Visualisation: Apache Superset
 
-[Superset](https://superset.apache.org) is a business intelligence application. It is used
-for the live analytics session: writing SQL against the warehouse and turning results into
-charts without writing plotting code.
+[Superset](https://superset.apache.org) is a business intelligence application. It is
+present as **tooling for the live analytics session**, not as a deliverable: the brief puts a
+reporting layer out of scope and separately asks that query and charting tooling be chosen
+and working in advance. Nothing in the pipeline depends on it.
 
 | Responsibility | How Superset is used |
 |---|---|
 | SQL exploration | SQL Lab runs ad-hoc queries against all four schemas |
-| Charts and dashboards | Query results are saved as charts and assembled into dashboards |
+| Charting | A query result becomes a chart without writing plotting code |
 | Connection | Registered automatically at container boot as `White Lodge`, read-only |
 | Driver | `duckdb-engine`, a SQLAlchemy dialect over the Python `duckdb` package |
 
@@ -311,6 +313,10 @@ Five inputs. Four are supplied with the brief. One is retrieved from a governmen
 | Pharmacies | CSV, 1 file | 37 rows | `npi` to `chain`. 7 chains |
 | Partners | CSV, 1 file | 6 rows | Terms: flat `fee_cents` or `fee_percentage` |
 | NADAC | CSV over HTTPS | 1,028,250 rows | [CMS public dataset](https://data.medicaid.gov/dataset/fbb83258-11c7-47f5-8b18-5f8e79f7e704), per-unit acquisition cost |
+
+`fee_cents` is declared `int` in the brief and stored as `DOUBLE` here, because the column
+is nullable and the value is divided by 100 before use. Every other field matches the
+declared type.
 
 Claims span 2026-03-01 to 2026-07-31. NADAC arrives as 34 weekly snapshots covering January
 to August 2026 across 32,509 NDC codes, so the cost window covers the claim window.
@@ -569,7 +575,8 @@ hippo-challenge/
 │   ├── 01_partner_value.sql      partner ranking by margin, volume and revenue
 │   ├── 02_conversion_funnel.sql  lookup to claim to reversal
 │   ├── 03_data_quality.sql       records excluded, and the reason
-│   └── 04_margin_by_drug.sql     margin and unit spread per drug
+│   ├── 04_margin_by_drug.sql     margin and unit spread per drug
+│   └── 05_fee_term_scenarios.sql what a change of partner terms would retain
 │
 ├── specs/                        SPEC-DRIVEN DEVELOPMENT
 │   ├── README.md                 the workflow
@@ -658,7 +665,72 @@ Implemented in one macro, [`partner_fee_share`](transform/macros/partner_fee_sha
 
 ---
 
-## 10. Querying, charting and the data catalog
+## 10. Proposed metrics
+
+Metric definitions are stated here so that two people computing the same number get the
+same answer. Every one is a single aggregate over `gold`, and each names the column it
+uses, because the gross and net pairs make the wrong choice easy.
+
+### The mechanism these metrics are built around
+
+`pbm_fee` is uncorrelated with `price` (r = 0.07) and is flat across price quintiles at
+roughly 7.34 per claim. **White Lodge earns per transaction, not per dollar dispensed.**
+Generic drugs are 80 percent of claims and produce 77 percent of retained margin on 4.6
+million of revenue, while brand drugs produce 195.8 million of revenue and 22 percent of
+margin. Metrics are therefore defined per fill and per lookup, not as a percentage of
+revenue.
+
+### Primary
+
+| Metric | Definition | Current |
+|---|---|---|
+| **Retained margin** | `sum(net_white_lodge_margin)` on `fct_claim` | 184,351 |
+| **Retained margin per fill** | `sum(net_white_lodge_margin) / sum(net_fills)` | 4.76 |
+| **Margin per lookup** | `sum(net_white_lodge_margin) / count(*)` on `fct_lookup` | 1.01 |
+
+Margin per lookup is the one to watch, because it moves with conversion and with
+commercial terms at the same time. A partner improves it either by converting more of the
+traffic it sends or by costing less per conversion.
+
+### Commercial
+
+| Metric | Definition | Current |
+|---|---|---|
+| **Fee payout ratio** | `sum(net_partner_fee) / sum(net_pbm_fee)` | 35.2 percent |
+| **Fee collected** | `sum(net_pbm_fee)` | 284,542 |
+| **Fills** | `sum(net_fills)`, never `count(*)` | 38,746 |
+
+The payout ratio is the single largest controllable input to margin. It ranges from 0
+percent to 80 percent across the six partners under current terms.
+
+### Funnel
+
+| Metric | Definition | Current |
+|---|---|---|
+| **Conversion rate** | `sum(converted_to_valid_claim) / count(*)` on `fct_lookup` | 23.1 percent |
+| **Reversal rate** | `sum(is_reverted) / count(*)` on `fct_claim` | 6.66 percent |
+| **Margin lost to reversal** | `sum(white_lodge_margin) where is_reverted`, using the gross column | 13,255 |
+
+Conversion is measurable per partner and per channel, but **not per chain**: a lookup has
+no pharmacy attached until it converts, so there is no chain to group by. That is a
+property of the events, not a gap in the model.
+
+### Pipeline health
+
+| Metric | Definition | Current |
+|---|---|---|
+| **Rejection rate** | `count(bronze.brz_rejects) / landed record count` | 1.0 percent |
+| **Cost coverage** | `1 - sum(flag_cost_unavailable) / count(*)` on `fct_claim` | 98.6 percent |
+| **Excluded claim value** | `sum(price) where flag_duplicate_claim_id` on `brz_claims` | 1,293,313 |
+
+These are reported alongside the business metrics rather than hidden in logs, because a
+margin figure means nothing without the coverage figure next to it. Cost coverage in
+particular gates any margin statement: a drop means claims are being counted with no cost
+attached.
+
+---
+
+## 11. Querying, charting and the data catalog
 
 Three interfaces read the same warehouse file, `data/warehouse/white_lodge.duckdb`. All
 three connect read-only.
@@ -666,7 +738,7 @@ three connect read-only.
 | Interface | Command | Port | Purpose |
 |---|---|---|---|
 | SQL shell | `task query` | none | Scripted and one-off queries from the terminal |
-| Superset | `task up` | 8088 | Ad-hoc SQL, charts and dashboards |
+| Superset | `task up` | 8088 | Ad-hoc SQL and charting, for the live session |
 | dbt docs | `task docs` | 8090 | Model catalog, column documentation and lineage |
 
 ### The SQL shell
@@ -678,10 +750,10 @@ task query -- "select partner, round(sum(net_white_lodge_margin),2) as margin
 ```
 
 Schemas in order: `landing`, `bronze`, `silver`, `gold`. Begin at `gold`, and move down a
-layer to inspect what was excluded and why. Four starting queries are in
+layer to inspect what was excluded and why. Five starting queries are in
 [`analysis/queries/`](analysis/queries/).
 
-### Superset: ad-hoc queries and dashboards
+### Superset: ad-hoc queries and charting
 
 ```bash
 task up     # http://localhost:8088, credentials admin / admin
@@ -698,11 +770,13 @@ selectable, table schemas are browsable in the left panel, and results are expor
 or copied to the clipboard. The screenshot above shows `SHOW ALL TABLES` returning the 33
 relations across `landing`, `bronze`, `silver` and `gold`.
 
-**Charts and dashboards.** Any query result becomes a chart through **Create Chart**,
-without writing plotting code. Charts are saved and assembled into dashboards, so a set of
-questions is answered once and then re-read whenever the pipeline reruns. Because Superset
-reads the DuckDB file directly rather than a copy, a chart reflects the current state of the
-warehouse after each `task transform`.
+**Charting an answer without writing plotting code.** Any query result becomes a chart
+through **Create Chart**. Because Superset reads the DuckDB file directly rather than a
+copy, a chart reflects the state of the warehouse after the most recent `task transform`.
+
+No charts or dashboards are shipped in this repository. The brief places a reporting layer
+out of scope and asks instead that query and charting tooling be ready in advance, so this
+is the tool standing by, connected and tested, rather than a deliverable.
 
 The connection is mounted read-only, so no action taken in Superset can modify the
 warehouse.
@@ -775,7 +849,7 @@ task refresh    # down, build, up
 
 ---
 
-## 11. Tests
+## 12. Tests
 
 `task test` runs both suites: 21 pytest tests and 61 dbt nodes. Tests cover logic that can
 produce incorrect results.
@@ -819,7 +893,7 @@ contribute zero, the twice-reverted claim counts once, and no reversal precedes 
 
 ---
 
-## 12. Spec-driven development for AI
+## 13. Spec-driven development for AI
 
 The repository is structured so that an AI assistant, or a contributor with no prior
 context, can read it, extend it and modify it. The limiting factor in that work is
@@ -891,7 +965,7 @@ rather than a diff.
 
 ---
 
-## 13. Limits and next steps
+## 14. Limits and next steps
 
 ### Not implemented
 
