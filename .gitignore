@@ -1,6 +1,8 @@
-# Data, not committed; reproduce with `task data` (unpacks data/sample-data.tar.gz)
+# Only the supplied archive is committed. Everything else under data/ is produced
+# by `task build`: the unpacked source files, the NADAC download and the warehouse.
 data/*
-!data/.gitkeep
+!data/sample-data.tar.gz
+!data/README.md
 
 # Python / uv
 .venv/
@@ -22,8 +24,11 @@ transform/.user.yml
 .claude/settings.local.json
 .task-lock/
 
-# Personal study notes, not part of the deliverable
+# Personal working files, not part of the deliverable.
+# The email replies belong in the body of the submission email, per the brief,
+# so the draft is kept locally and pasted from rather than committed.
 STUDY.md
+docs/email-replies.md
 
 # Personal documents that happen to sit in this directory, never committed
 payslip_*.pdf

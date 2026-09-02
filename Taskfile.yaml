@@ -284,6 +284,16 @@ tasks:
       - rm -rf "${HOME}/.dlt/pipelines/white_lodge"
       - 'echo "warehouse removed, run `task build` to rebuild"'
 
+  reset:
+    desc: >-
+      Return data/ to its source state, keeping only sample-data.tar.gz. Deletes the
+      unpacked files, the NADAC cache and the warehouse. Rebuild with `task build`.
+    prompt: "Delete data/landing, data/external and data/warehouse. sample-data.tar.gz is kept. Continue?"
+    cmds:
+      - rm -rf data/landing data/external data/warehouse
+      - rm -rf "${HOME}/.dlt/pipelines/white_lodge" transform/target transform/logs
+      - 'echo "data/ reset to source state. Run: task build"'
+
   nuke:
     desc: clean + remove containers, volumes, and the cached NADAC download.
     cmds:
