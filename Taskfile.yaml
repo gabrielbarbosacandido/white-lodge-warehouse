@@ -279,7 +279,9 @@ tasks:
     desc: Delete the warehouse and dbt artifacts (keeps landed source files).
     cmds:
       - rm -rf "{{.DUCKDB}}" transform/target transform/logs
-      - uv run dlt pipeline white_lodge drop-pending-packages 2>/dev/null || true
+      # dlt persists the inferred schema outside the warehouse and will not narrow
+      # an existing column type, so a rebuild is only truly clean once it is gone.
+      - rm -rf "${HOME}/.dlt/pipelines/white_lodge"
       - 'echo "warehouse removed, run `task build` to rebuild"'
 
   nuke:

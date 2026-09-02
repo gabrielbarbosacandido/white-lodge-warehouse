@@ -21,6 +21,16 @@ import dlt
 
 from white_lodge.contracts import validate_claim, validate_lookup, validate_revert
 
+# The source timestamps carry no offset ("2026-03-01T00:02:01"), so they are wall
+# clock times. Stored as TIMESTAMPTZ they would be read back through whatever
+# session timezone the reader happens to have, which shifts the derived date and
+# makes results differ between machines. Declaring them timezone-naive keeps the
+# value exactly as the source wrote it.
+# A fresh dict per resource: dlt writes the column name into the hint it is
+# given, so a single shared dict would leak one resource's column into the others.
+def naive_ts(column: str) -> dict[str, dict[str, Any]]:
+    return {column: {"data_type": "timestamp", "timezone": False}}
+
 
 def _read_json_dir(directory: Path) -> Iterator[tuple[dict[str, Any], str]]:
     """Yield (record, source_file) for every record in every JSON file."""
@@ -50,16 +60,19 @@ def _stream(directory: Path, validate: Callable, rejects_table: str) -> Iterator
             yield {**clean, "_source_file": source_file}
 
 
-@dlt.resource(name="claims", write_disposition="replace")
+@dlt.resource(name="claims", write_disposition="replace",
+              columns=naive_ts("filled_at"))
 def claims(directory: Path) -> Iterator[dict[str, Any]]:
     yield from _stream(directory, validate_claim, "claims_rejects")
 
 
-@dlt.resource(name="reverts", write_disposition="replace")
+@dlt.resource(name="reverts", write_disposition="replace",
+              columns=naive_ts("reverted_at"))
 def reverts(directory: Path) -> Iterator[dict[str, Any]]:
     yield from _stream(directory, validate_revert, "reverts_rejects")
 
 
-@dlt.resource(name="lookups", write_disposition="replace")
+@dlt.resource(name="lookups", write_disposition="replace",
+              columns=naive_ts("looked_up_at"))
 def lookups(directory: Path) -> Iterator[dict[str, Any]]:
     yield from _stream(directory, validate_lookup, "lookups_rejects")

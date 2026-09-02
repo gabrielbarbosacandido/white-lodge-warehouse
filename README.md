@@ -312,7 +312,7 @@ Five inputs. Four are supplied with the brief. One is retrieved from a governmen
 | Partners | CSV, 1 file | 6 rows | Terms: flat `fee_cents` or `fee_percentage` |
 | NADAC | CSV over HTTPS | 1,028,250 rows | [CMS public dataset](https://data.medicaid.gov/dataset/fbb83258-11c7-47f5-8b18-5f8e79f7e704), per-unit acquisition cost |
 
-Claims span 2026-02-28 to 2026-07-31. NADAC arrives as 34 weekly snapshots covering January
+Claims span 2026-03-01 to 2026-07-31. NADAC arrives as 34 weekly snapshots covering January
 to August 2026 across 32,509 NDC codes, so the cost window covers the claim window.
 
 ### Data quality issues present in the source
@@ -502,7 +502,7 @@ erDiagram
 | `dim_pharmacy` | One NPI | 37 |
 | `dim_partner` | One partner | 6 |
 | `dim_drug` | One NDC observed in any event | 49 |
-| `dim_date` | One calendar day across the event range | 154 |
+| `dim_date` | One calendar day across the event range | 153 |
 
 **Two fact tables rather than one.** 76 percent of lookups never convert. A single table at
 claim grain cannot represent the 134,000 lookups that never became claims. A single table at
