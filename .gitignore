@@ -19,8 +19,9 @@ transform/.user.yml
 
 # Local
 .DS_Store
-# Local overrides of the source paths. Every path has a default in settings.py,
-# so a clone runs without this file.
+# Local overrides of the source paths. .env.example is the committed template;
+# copy it to .env. Every path also has a default in settings.py, so a clone runs
+# without either file.
 .env
 
 # Claude Code local state

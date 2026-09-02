@@ -138,7 +138,7 @@ teardown.
 | Container control | `task up`, `task down`, `task ps` wrap docker compose |
 | Concurrency guard | `task ingest` and `task transform` acquire a lock, since DuckDB accepts one writer |
 | Idempotence | `status:` guards skip unpacking data or installing dbt packages when already done |
-| Environment | `dotenv: [".env"]` loads source paths, so no path is hardcoded |
+| Environment | `dotenv: [".env"]` loads source paths, so no path is hardcoded. Template in `.env.example` |
 
 **Why Task rather than Make.** Named parameters, `status:` preconditions and `deps:` are
 used directly. The YAML format also documents itself in `task --list`.
@@ -229,11 +229,38 @@ without touching ingestion code.
 
 ```bash
 brew install go-task uv     # prerequisites
+cp .env.example .env        # optional, see below
 ```
 
 A fresh clone contains only `data/sample-data.tar.gz`. `task build` unpacks it, downloads
 NADAC and produces the warehouse, so the first run needs an internet connection. See
 [data/README.md](data/README.md).
+
+### Configuration: `.env`
+
+The brief requires that every source be a path the pipeline can be pointed at, not a
+hardcoded location. That contract lives in [`.env.example`](.env.example), the committed
+template. `.env` itself is not committed, because it is the file each person edits.
+
+Copying it is optional. Every variable has the same value as a default in
+[`settings.py`](src/white_lodge/settings.py), and `go-task` tolerates a missing `.env`, so
+`task build` works on a fresh clone with no configuration at all.
+
+It matters when you need to change where the pipeline reads or writes:
+
+| To do this | Set |
+|---|---|
+| Point ingestion at a different drop location | `WL_CLAIMS_DIR` and the other `_DIR` variables |
+| Build a second warehouse without touching the real one | `WL_DUCKDB_PATH` |
+| Pin or move the NADAC snapshot the costs are measured against | `WL_NADAC_URL` |
+
+`WL_DUCKDB_PATH` is the one to reach for most often. DuckDB accepts a single writer, so
+testing a failure path against the live warehouse either blocks or corrupts it. Copy the
+file, point `WL_DUCKDB_PATH` at the copy, and the whole toolchain follows: `task`, dbt and
+the query shell all read the same variable.
+
+Precedence is narrowest first: a CLI flag beats an environment variable, which beats
+`.env`, which beats the default in `settings.py`.
 
 ### The four command contract
 
@@ -549,7 +576,7 @@ hippo-challenge/
 ├── CLAUDE.md                     working agreement for AI assistants and contributors
 ├── CHALLENGE.md                  the assignment brief, unmodified
 ├── pyproject.toml / uv.lock      dependencies, managed by uv
-├── .env                          optional, overrides the paths in settings.py. Not committed
+├── .env.example                  template for .env. Copy it, then edit the paths
 │
 ├── src/white_lodge/              INGESTION, dlt
 │   ├── cli.py                    `wl ingest`, one option per source directory
